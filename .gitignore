@@ -1,0 +1,20 @@
+# Virtual environment
+venv/
+env/
+__pycache__/
+*.pyc
+
+# Video files — excluded on purpose:
+# 1. Size — even a handful of clips adds up fast in a git repo
+# 2. UR Fall Detection Dataset license is non-commercial / research use
+#    only and doesn't permit redistribution — so raw dataset clips and
+#    our generated annotated videos should never be pushed to GitHub.
+# CSV logs (the actual evidence of testing) are NOT ignored — those stay.
+*.mp4
+*.avi
+*.mov
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/

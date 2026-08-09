@@ -1,0 +1,162 @@
+# FallGuard — Project Log
+
+Running log of milestones, bugs, and findings as the project develops.
+Each entry should capture: what happened, what we learned, and what
+(if anything) changed in the code as a result. This is raw material —
+the README gets written FROM this, not the other way around.
+
+---
+
+## Entry 1 — Pipeline scaffold built
+**Date:** Week 1, Day 1
+
+Built the initial end-to-end skeleton: pose estimation (MediaPipe) →
+feature engineering (torso angle, aspect ratio, hip velocity) →
+rule-based fall classifier (impact + settled two-phase state machine)
+→ CLI pipeline with CSV logging and annotated video output.
+
+No real data run yet at this point — syntax-validated only.
+
+---
+
+## Entry 2 — MediaPipe 1.0.0 breaking change
+**Date:** Week 1, Day 1 (setup)
+
+**What happened:** Fresh `pip install mediapipe` pulled version 1.0.0,
+which replaced the legacy `mp.solutions` API with a new "Tasks" API.
+Our `pose_estimation.py` was written against `mp.solutions.pose`, so
+every run crashed immediately with:
+```
+AttributeError: module 'mediapipe' has no attribute 'solutions'
+```
+
+**Finding:** `requirements.txt` had an unpinned `mediapipe>=0.10.9`,
+which is exactly the kind of thing that silently breaks a working
+project months later when a dependency ships a major version bump.
+
+**Fix:** Pinned `mediapipe==0.10.21` in `requirements.txt`, the last
+version before the Tasks API migration, with a comment explaining why.
+
+**Takeaway for README:** worth a line about dependency pinning
+discipline — this is a real production lesson, not just a personal
+setup hiccup.
+
+---
+
+## Entry 3 — First real run: fall not detected (cam0)
+**Date:** Week 1, Day 2
+
+**What happened:** Ran the pipeline on `fall-01-cam0.mp4` from the
+UR Fall Detection Dataset. Pipeline completed cleanly (160 frames
+processed, CSV + annotated video written), but **no fall alert fired**
+despite the clip containing a real fall.
+
+**Investigation:** Inspecting the CSV around the fall:
+- Frame 114: torso_angle=81.2°, hip_velocity=1.04 → correctly crossed
+  both thresholds, `impact_detected` fired.
+- Frames 116–121: pose landmarks missing entirely (MediaPipe lost
+  tracking right at the moment of impact — common, expected).
+- Frame 122: landmarks reappear, but torso_angle reads **8.9°** — a
+  single anomalous low reading. Our recovery logic treated this as
+  "person got back up" and reset state to `normal` on ONE frame.
+
+**Root cause (deeper):** the low angle wasn't just noise — it was
+sustained for many subsequent frames too. This is a genuine limitation
+of 2D single-camera pose angle: when a fall happens roughly *along*
+the camera's viewing axis (toward/away from camera) rather than across
+it, the projected shoulder-hip line can foreshorten and no longer
+reads as "horizontal" even though the person is fully down.
+
+**Fix (two parts):**
+1. Added debounce — "recovery" now requires 5 consecutive low-angle
+   frames, not one, before resetting state.
+2. Added a second, independent confirmation signal: **post-impact
+   stillness**. If hip vertical velocity stays near-zero
+   (`< 0.2` units/sec) for 4 consecutive frames after an impact, we
+   confirm the fall regardless of what torso_angle says. A person who
+   actually fell typically stops moving; this doesn't depend on the
+   angle measurement at all, so it's immune to the foreshortening
+   problem above.
+
+**Result after fix:** replayed the same clip's data through the
+patched detector — `fall_confirmed` correctly fires at frame 127,
+confidence 0.95, and stays confirmed for the rest of the clip.
+
+**Takeaway for README:** this is the single best "here's a real bug I
+found and fixed" story in the project. Good interview material —
+shows understanding of camera geometry limitations, not just
+plugging in a library.
+
+---
+
+## Entry 4 — Same fall, second camera angle: total miss (cam1)
+**Date:** Week 1, Day 2
+
+**What happened:** Ran the identical pipeline (post-fix) on
+`fall-01-cam1.mp4` — same fall event, same timestamp, filmed from a
+second physical camera angle (UR Fall dataset ships synchronized
+dual-camera footage). Result: **`state` stayed `normal` for all 160
+frames.** No impact ever detected, let alone confirmed.
+
+**Investigation — comparing peak values across both cameras:**
+
+| Signal | Cam0 peak | Cam1 peak | Threshold |
+|---|---|---|---|
+| torso_angle | 89.5° | 34.8° | 60° |
+| hip_velocity | 1.04 | 1.19 | 0.8 |
+| aspect_ratio | 0.96 | 0.34 | — |
+
+Hip velocity alone clears the threshold comfortably on cam1 (multiple
+frames >0.8, peak 1.19) — the downward motion is real and strongly
+detected. But torso_angle never comes close to 60°, and aspect_ratio
+never rises above 0.34 (should approach/exceed 1.0 for a "wide, short"
+fallen silhouette). Both shape-based signals stay in "standing" range
+the entire clip.
+
+**Root cause:** cam1 is positioned such that this particular fall
+happens more toward/away from the camera than sideways across it —
+the same foreshortening issue from Entry 3, except this time it
+corrupts the *initial impact detection*, not just the recovery check.
+Since our impact trigger requires BOTH angle AND velocity to cross
+threshold simultaneously, and angle never does, the detector never
+even leaves the `normal` state — so the stillness fallback (which only
+activates post-impact) never gets a chance to run either.
+
+**Fix:** none applied yet — this is a genuine architectural limitation,
+not a quick threshold tweak. Logged here as v2 scope.
+
+**Takeaway for README:** this is strong, quantified evidence for why
+single fixed-camera 2D fall detection has a fundamental reliability
+ceiling — the exact same real-world event was correctly caught by one
+camera and completely missed by another, using identical detection
+logic. Justifies multi-camera fusion (or velocity-only fallback
+triggers) as a v2 priority, not just a "nice to have."
+
+**Ideas for v2, to evaluate:**
+- Multi-camera fusion — combine confidence scores from multiple
+  camera angles, weighted by which camera has cleaner/more decisive
+  signal at that moment.
+- Velocity-only trigger path — allow impact detection to fire on a
+  strong velocity spike alone (without requiring angle), falling back
+  to the stillness signal for confirmation. Would need false-positive
+  testing against non-fall clips (e.g. someone jogging/sitting fast)
+  to check this doesn't hurt precision.
+
+---
+
+## Entry template (copy for new findings)
+
+## Entry N — [short title]
+**Date:**
+
+**What happened:**
+
+**Investigation:**
+
+**Root cause:**
+
+**Fix:**
+
+**Result:**
+
+**Takeaway for README:**

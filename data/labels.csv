@@ -1,0 +1,10 @@
+clip,expected
+fall-01-cam0,fall
+fall-01-cam1,fall
+fall-02-cam0,fall
+fall-02-cam1,fall
+fall-03-cam0,fall
+fall-03-cam1,fall
+adl-sitting-cam0,no_fall
+adl-bending-cam0,no_fall
+adl-lying-cam0,no_fall

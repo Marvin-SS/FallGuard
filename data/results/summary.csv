@@ -1,0 +1,10 @@
+clip,expected,detected,correct,confidence,detection_frame,detection_timestamp
+fall-01-cam0,fall,fall,True,0.95,127,4.233333333333333
+fall-01-cam1,fall,no_fall,False,0.0,,
+fall-02-cam0,fall,N/A,N/A,,,
+fall-02-cam1,fall,N/A,N/A,,,
+fall-03-cam0,fall,N/A,N/A,,,
+fall-03-cam1,fall,N/A,N/A,,,
+adl-sitting-cam0,no_fall,N/A,N/A,,,
+adl-bending-cam0,no_fall,N/A,N/A,,,
+adl-lying-cam0,no_fall,N/A,N/A,,,
