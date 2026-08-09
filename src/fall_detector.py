@@ -61,6 +61,15 @@ class FallDetectorConfig:
                                                # this is the fallback for when angle
                                                # reads unreliably (see foreshortening
                                                # note above)
+    velocity_spike_window_frames: int = 20    # how many frames a velocity spike
+                                               # "counts" for, even after velocity
+                                               # itself has dropped back down — peak
+                                               # downward velocity and peak torso
+                                               # angle often don't land on the same
+                                               # frame (person speeds up while still
+                                               # rotating, then decelerates on impact
+                                               # as rotation finishes), so requiring
+                                               # both simultaneously misses real falls
 
 
 class FallDetector:
@@ -71,6 +80,7 @@ class FallDetector:
         self.settled_frame_count = 0
         self.recovery_frame_count = 0
         self.still_frame_count = 0
+        self.velocity_spike_countdown = 0
         self.history = deque(maxlen=30)  # rolling buffer for debugging/logging
 
     def update(self, feature_row: dict) -> dict:
@@ -87,6 +97,16 @@ class FallDetector:
 
         confidence = 0.0
 
+        # Track a recent velocity spike in a sliding window, independent of
+        # whether angle data is available this frame. This runs BEFORE the
+        # missing-data check below on purpose — velocity can spike on a
+        # frame where landmarks are otherwise fine, and we don't want a
+        # later occlusion gap to erase that memory.
+        if velocity is not None and velocity >= cfg.velocity_spike_threshold:
+            self.velocity_spike_countdown = cfg.velocity_spike_window_frames
+        elif self.velocity_spike_countdown > 0:
+            self.velocity_spike_countdown -= 1
+
         if angle is None or velocity is None:
             # Missing pose data (occlusion, person left frame, person now
             # prone and hard to track, etc.) — this is EXPECTED right after
@@ -100,7 +120,13 @@ class FallDetector:
             return self._result(confidence)
 
         if self.state == FallState.NORMAL:
-            if velocity >= cfg.velocity_spike_threshold and angle >= cfg.torso_angle_fall_threshold:
+            # A velocity spike within the last `velocity_spike_window_frames`
+            # PLUS the angle threshold being crossed now (even if that
+            # happens on a later frame than the spike itself) counts as an
+            # impact. This is what catches falls where the person is still
+            # rotating downward when velocity peaks, and only finishes
+            # tipping past the angle threshold a beat later.
+            if angle >= cfg.torso_angle_fall_threshold and self.velocity_spike_countdown > 0:
                 self.state = FallState.IMPACT_DETECTED
                 self.frames_since_impact = 0
                 self.settled_frame_count = 0
@@ -183,4 +209,5 @@ class FallDetector:
         self.frames_since_impact = 0
         self.settled_frame_count = 0
         self.recovery_frame_count = 0
+        self.velocity_spike_countdown = 0
         self.history.clear()

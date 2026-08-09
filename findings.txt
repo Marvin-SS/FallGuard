@@ -144,6 +144,143 @@ triggers) as a v2 priority, not just a "nice to have."
 
 ---
 
+## Entry 5 — Batch runner built; local files went out of sync twice; first push
+**Date:** Week 1, Day 3
+
+**What happened:** Built infrastructure to test multiple clips at once
+instead of running one video at a time by hand: `src/batch_runner.py`
+reads `data/labels.csv` (clip name → expected `fall`/`no_fall`), runs
+the full pipeline on every listed clip, and writes one `summary.csv`
+scoring every result — plus still writes a full per-clip CSV log each
+time, same as before, so individual bugs stay debuggable.
+
+Also decided to stop shipping the project as a single zip and instead
+share individual files as they're built/changed — closer to how a real
+repo evolves file by file.
+
+**What went wrong (twice):** after adding `run_pipeline.py`'s `run()`
+signature change (needed so batch_runner could get results back as
+data instead of only printed text) and separately after the earlier
+`fall_detector.py` stillness-signal fix, the local project fell out of
+sync with what had actually been designed/tested. Two real incidents:
+
+1. First batch run crashed immediately:
+   `TypeError: run() got an unexpected keyword argument 'quiet'`
+   — the local `run_pipeline.py` was still the old version; the
+   updated one had been described and tested but never actually
+   handed over as a file to save locally.
+2. After fixing that, the batch run completed but scored
+   `fall-01-cam0` as a MISS — which contradicted Entry 3, where we'd
+   already proven this exact clip gets caught after the stillness-fix.
+   Same root cause: local `fall_detector.py` was still the pre-fix
+   version.
+
+**Root cause (general):** any time a fix is designed and verified by
+testing code in an assistant sandbox, but not explicitly re-delivered
+as a file, the person's local project silently stays on the old
+version — and it can *look* like it's working (no errors) right up
+until a test result contradicts an earlier documented finding.
+
+**Fix:** did a manual file-by-file audit — listed every file delivered
+across the whole conversation, and used `findstr`/`type` on the two
+files not recently re-verified (`pose_estimation.py`, `features.py`)
+to confirm their content matched what was expected, before trusting
+any further test results.
+
+**Result:** after replacing both outdated files, batch runner produced
+the CORRECT, expected result:
+```
+fall-01-cam0: expected=fall detected=fall ✓
+fall-01-cam1: expected=fall detected=no_fall ✗ MISS   (expected — see Entry 4)
+RESULTS: 1/2 correct (7 skipped — clips not downloaded yet)
+```
+
+Also completed first `git init` → `git add .` → `git status` safety
+check (confirmed `venv/`, `.mp4` files, and `__pycache__/` were all
+correctly excluded per `.gitignore`) → committed → pushed to GitHub
+successfully. Repo is now public and under version control.
+
+**Takeaway for README:** two things worth a line each —
+1. The batch runner itself (multi-clip testing + summary scoring) is
+   a real feature worth describing, not just a testing convenience.
+2. Worth being explicit in the repo about the workflow discipline of
+   verifying local files against intended changes before trusting a
+   test result — small thing, but it's the kind of "I check my own
+   work" habit that's easy to claim and rare to actually demonstrate
+   with a real example.
+
+---
+
+## Entry 6 — Second fall clip missed entirely: velocity/angle timing bug (cam0)
+**Date:** Week 1, Day 4
+
+**What happened:** Ran `fall-02-cam0.mp4` through the pipeline. Same
+symptom as the very first cam0 run — pipeline completed cleanly
+(110 frames), but `state` stayed `normal` for the entire clip. No
+impact ever detected.
+
+**Ground truth (confirmed by watching the actual video, not just the
+CSV):** subject starts seated on the right side of frame, slowly leans
+forward, **knees hit the ground first**, then the rest of the body
+follows and collapses down. Not a straight topple — a two-stage
+kneel-then-collapse fall.
+
+**Investigation:** the CSV showed both signals working correctly, just
+never overlapping:
+- Frame 65: `hip_velocity = 0.86` (clears 0.8 threshold) —
+  `torso_angle = 41°` (nowhere near the 60° threshold yet). This is
+  the lean-forward still in progress.
+- Frame 75: `hip_velocity = 0.85` (clears threshold again) —
+  `torso_angle = 53°`. Almost certainly the knees making contact —
+  a sudden downward motion of the lower body, measured at the hip.
+- Frame 81: `torso_angle = 89.6°` (fully horizontal — body has now
+  collapsed onto the ground) — but by now `hip_velocity = 0.28`,
+  well under threshold. The knee-impact's velocity spike has already
+  faded by the time the torso finishes going down.
+
+**Root cause:** the impact trigger required
+`hip_velocity >= threshold AND torso_angle >= threshold` on the exact
+same frame. This fall has two distinct physical sub-events roughly
+12-16 frames apart (knee impact, then torso collapse) — the velocity
+spike belongs to the knees landing, the angle threshold gets crossed
+later by the torso finishing its collapse. Requiring both
+simultaneously misses this shape of fall entirely, even though both
+signals independently behaved exactly as expected.
+
+Broader implication: hip-velocity alone is really a proxy for
+"the body's center of mass is dropping fast" — it doesn't distinguish
+which body part initiates ground contact. A kneel-first fall (common
+in real elderly fall scenarios — reaching for something, losing
+balance while seated or near a chair) has a meaningfully different
+velocity/angle signature than a straight topple.
+
+**Fix:** replaced the same-frame requirement with a sliding window.
+A velocity spike is now "remembered" for `velocity_spike_window_frames`
+(20 frames, ~0.6s) after it happens. If the angle threshold gets
+crossed any time within that window — even many frames after the
+velocity spike itself has faded back down — it still counts as a
+valid impact. Added as `velocity_spike_countdown` in `fall_detector.py`,
+tracked before the missing-landmark early-return so an occlusion gap
+can't erase the memory of a real spike.
+
+**Result:** re-ran the same clip post-fix —
+`[ALERT] Fall confirmed at frame 87 (t=2.90s, confidence=0.95)`.
+Also regression-tested against the already-solved `fall-01-cam0` case
+to confirm the fix didn't reintroduce the earlier bug — still confirms
+correctly.
+
+**Takeaway for README:** this is a different CLASS of bug than Entry 3.
+Entry 3 was about measurement RELIABILITY (the angle number itself was
+misleading due to camera geometry). This one is about event TIMING —
+both measurements were accurate, but the detection logic assumed two
+signals from the same fall would always co-occur on the same frame,
+and a real, common fall pattern (kneel first, body follows) proved
+that assumption wrong. Good example of the difference between "the
+sensor lied" bugs and "the model of the physical world was too
+simple" bugs — worth naming that distinction explicitly in the README.
+
+---
+
 ## Entry template (copy for new findings)
 
 ## Entry N — [short title]
