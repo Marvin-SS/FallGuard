@@ -281,6 +281,82 @@ simple" bugs — worth naming that distinction explicitly in the README.
 
 ---
 
+## Entry 7 — Overhead camera breaks the feature basis entirely (fall-02-cam1)
+**Date:** Week 1, Day 4
+
+**What happened:** Ran `fall-02-cam1.mp4` — same fall event as Entry 6
+(fall-02-cam0, the kneel-then-collapse fall), second camera angle.
+Result: no alert, `state` stayed `normal` for all 110 frames.
+
+**Ground truth (confirmed by watching the video):** cam1 for this
+clip is mounted **directly overhead**, centered on the seated subject
+— not a second side-on angle like fall-01's dual cameras. Subject
+goes straight down naturally: knees drive into the ground first,
+hands connect, then subject rolls onto their side.
+
+**Investigation:** the CSV showed a DIFFERENT failure pattern than any
+previous entry:
+- `torso_angle` reads 55°-90° from frame 14 onward (`t=0.47s`) — while
+  the subject is still normally seated, per ground truth. A seated
+  person should read well under our 60° fall threshold; instead the
+  angle is already in "fallen" range almost from the start of the clip.
+- `hip_velocity` never crosses the 0.8 threshold anywhere in the whole
+  clip — peaks around 0.5-0.7 (vs. 0.85 on cam0, same fall, same
+  moment). The one signal that DID work on fall-02-cam0 is muted here.
+
+**Root cause — different in kind from every previous entry:** cam0's
+issues (Entries 3, 4, 6) all involved a side-mounted camera at an
+imperfect angle or with imperfect timing — the FEATURES still meant
+what we intended, just imperfectly measured. This is different:
+`torso_angle` and `hip_velocity` are both defined assuming a roughly
+side-on (profile) camera:
+  - `torso_angle` = angle of the 2D shoulder-hip vector from vertical,
+    IN IMAGE SPACE. From directly overhead, this vector no longer
+    represents torso tilt at all — it reflects which way the shoulders
+    happen to be rotated in the horizontal plane. A seated person can
+    read "high" purely from posture/orientation, unrelated to falling.
+  - `hip_velocity` = vertical (y-axis) pixel movement over time. From
+    a side camera, falling = moving toward the floor = increasing y =
+    clean signal. From overhead, falling toward the floor means moving
+    TOWARD the camera (getting closer/larger), not up/down in frame.
+    The muted y-motion we do see is likely just the body's horizontal
+    spread during knee/hand/side contact — a side effect of the fall,
+    not a direct measurement of it.
+
+This is not "harder to detect from this angle" (Entry 4's finding) —
+it's "these specific features don't describe falling at all from this
+camera type." The feature basis itself assumes a viewing geometry that
+doesn't hold for an overhead mount.
+
+**Fix:** none applied — this is real architectural scope, not a
+threshold or windowing fix like Entries 3/6. Logged as v2/v3 territory.
+
+**Result:** confirmed miss, root cause understood and distinct from
+all prior entries. No code changes this entry.
+
+**Takeaway for README:** this is the strongest limitations finding so
+far, and worth its own callout — real fall-detection deployments
+(senior care facilities, hospitals) commonly use CEILING-MOUNTED
+cameras for full-room coverage, so this isn't a hypothetical edge
+case. A production version would need either (a) an entirely different
+feature set for overhead views (e.g. 2D bounding-box area/shape change,
+motion blob dispersal, distance-from-center-of-room), or (b) a
+per-camera "viewing geometry" config so the system knows which feature
+set to apply based on how each camera is mounted. Good evidence this
+project understands camera geometry isn't a detail — it's a first-order
+design constraint.
+
+**Ideas for v2/v3, to evaluate:**
+- Overhead-specific feature set: bounding-box area (a body lying flat
+  occupies more 2D area from directly above than a seated/standing
+  body), aspect ratio behavior likely differs too and would need
+  re-deriving from overhead data specifically.
+- Per-camera config: store camera mount type (side / overhead / angled)
+  alongside each camera's stream, route to the appropriate feature
+  extractor rather than assuming one universal feature set.
+
+---
+
 ## Entry template (copy for new findings)
 
 ## Entry N — [short title]
