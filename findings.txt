@@ -294,6 +294,16 @@ clip is mounted **directly overhead**, centered on the seated subject
 goes straight down naturally: knees drive into the ground first,
 hands connect, then subject rolls onto their side.
 
+Visually confirmed with two frames: pre-fall (subject seated, seen
+as a top-down view of head/shoulders with no visible "upright vs.
+tilted" cue at all) and post-fall (subject sprawled flat on the floor
+next to the chair, body visibly larger/closer to the camera rather
+than shifted in any particular vertical image direction) — matches
+the root cause below exactly. Also worth noting: the dataset's cam1
+feed is a depth camera (paired depth + RGB, split-screen), not RGB
+alone — a real overhead solution would likely lean on the depth
+channel rather than forcing 2D RGB pose estimation from a bad angle.
+
 **Investigation:** the CSV showed a DIFFERENT failure pattern than any
 previous entry:
 - `torso_angle` reads 55°-90° from frame 14 onward (`t=0.47s`) — while
@@ -354,6 +364,281 @@ design constraint.
 - Per-camera config: store camera mount type (side / overhead / angled)
   alongside each camera's stream, route to the appropriate feature
   extractor rather than assuming one universal feature set.
+
+---
+
+## Entry 8 — "Good" camera fails too: it's trajectory, not camera number (fall-03-cam0)
+**Date:** Week 1, Day 5
+
+**What happened:** Ran `fall-03-cam0.mp4` (215 frames, ~7.2s). No
+alert. Unlike prior misses, `torso_angle` never rose above ~12° for
+the ENTIRE clip — no partial rise, no delayed catch-up, nothing close
+to the 60° threshold at any point.
+
+**Ground truth (confirmed by watching the video, 3 frames sampled):**
+subject starts near the door at the back of the room and walks
+STRAIGHT TOWARD the camera for the first ~6 seconds. Falls around
+`t=6s`, ending up lying on the ground with the body oriented
+toward/away from the camera (legs extending toward the lens), not
+sideways across the frame.
+
+**Investigation:** there IS a real, strong velocity spike — frame 171
+(`t=5.7s`), `hip_velocity=1.18`, well above the 0.8 threshold — timing
+lines up with the fall visible around `t=6s` in the sampled frames.
+But `torso_angle` at that same moment is only 5.9°, and never
+approaches 60° before or after. The Entry 6 velocity-window fix has
+nothing to "catch" here, because angle simply never gets close enough
+for the window to matter.
+
+**Root cause — this is cam0, the "good" camera, exhibiting cam1's
+exact Entry 3/4 weakness:** the subject's walking path put them
+moving TOWARD cam0 for the whole clip, and the fall itself continued
+along that same line (body ending up oriented along the camera's
+viewing axis rather than across it). This is the same foreshortening
+mechanism as Entry 3/4 — but it corrects an implicit assumption from
+those earlier entries. Entry 4 was written as "cam0 catches falls,
+cam1 misses them" — framed around WHICH camera. This clip proves that
+framing was incomplete: cam0 fails here for the identical geometric
+reason cam1 failed in Entry 3/4. **Reliability depends on the fall's
+direction relative to a given camera's viewing axis, not on which
+numbered camera is doing the recording.** Any fixed camera has a
+"bad" trajectory range; which trajectories are bad just depends on
+where that camera happens to be positioned in the room.
+
+**Sharper architectural insight, generalized across Entries 3/4/7/8:**
+`torso_angle` is not just one of two signals we weigh — it's a hard
+GATE. The state machine can only leave `normal` and enter
+`impact_detected` if angle crosses the 60° threshold. Even the
+Entry 6 fix (velocity spike remembered across a window) still requires
+angle to eventually cross threshold within that window — velocity
+alone, however extreme, can never trigger detection by itself under
+the current design. Every angle-based miss so far (Entry 4's cam1,
+Entry 7's overhead cam1, and now this frontal fall-03-cam0) fails for
+DIFFERENT underlying geometric reasons, but they all fail through the
+SAME single point of failure: the angle gate never opens.
+
+**Fix:** none applied — same as Entry 4/7, this is architecture-level,
+not a threshold tweak. But this entry upgrades the priority of an idea
+already logged in Entry 4 ("velocity-only trigger path") — with three
+independent angle-gate failures now on record, a velocity-only fallback
+path isn't just a nice-to-have, it looks like the single highest-value
+v2 change: allowing a sustained/strong-enough velocity spike to trigger
+`impact_detected` on its own (likely needs a stricter velocity
+threshold than the current combined-signal one, to avoid false
+positives from fast sitting/bending), independent of what angle is
+doing. That would directly catch this clip, Entry 4's cam1 miss AND
+Entry 7's overhead miss simultaneously — since velocity1.18, well
+above threshold, was actually correct in ALL THREE of those cases;
+angle was the common failure point every time.
+
+**Result:** confirmed miss, root cause understood, and reframes Entry 4
+more accurately. No code changes this entry — logged as the strongest
+case yet for the velocity-only fallback path.
+
+**Takeaway for README:** this is the entry that ties the whole
+limitations story together. Don't describe it as "camera 0 works,
+camera 1 doesn't" (inaccurate, per this entry) — describe it as
+"single fixed 2D cameras have a trajectory-dependent blind spot, and
+our angle-gated detection logic is a single point of failure across
+every instance of that blind spot found so far." That's a much
+stronger, more accurate systems-level insight than a per-camera
+scorecard, and it directly motivates the velocity-only fallback as
+next architecture work, not just multi-camera fusion.
+
+---
+
+## Entry 9 — Noisy, high-dropout tracking points to another steep-angle camera (fall-03-cam1)
+**Date:** Week 1, Day 5
+
+**What happened:** Ran `fall-03-cam1.mp4` (same fall as Entry 8,
+second camera angle). No alert fired. Unlike prior entries, the
+diagnosis here was made directly from the CSV pattern, without first
+pulling reference frames from the video — worth noting because the
+pattern was recognizable from data alone once compared against
+earlier entries.
+
+**Investigation — two patterns stood out, both different from any
+previous clip:**
+
+1. **Dropout rate far higher than normal, and NOT clustered around
+   the fall.** Roughly a third of all 215 frames have no landmarks at
+   all. Entry 3's dropout (fall-01-cam0) was a tight cluster of ~6
+   frames right at the moment of impact — expected, since hitting the
+   ground is when tracking is hardest. Here, large gaps appear
+   throughout the ENTIRE clip, including early sections that should
+   be calm standing/walking (e.g. frames 43-54 almost entirely blank).
+   This points to unstable tracking for the whole feed, not just a
+   fall-related occlusion.
+
+2. **Values that do come through are erratic, not smooth.** Frames
+   78-83: torso_angle jumps 22.4 -> 14.6 -> 14.5 -> 52.5 -> 22.8 ->
+   10.6 across six consecutive frames (0.2s) — swings far too fast to
+   reflect real body movement. Every previous entry's angle curve
+   (even the wrong ones, like Entry 4/7) moved smoothly frame to
+   frame; this one doesn't.
+
+**Root cause (inferred, not yet visually confirmed):** this pattern
+doesn't match Entry 3/4/8's category (smooth, foreshortening from a
+side-mounted camera at a bad trajectory angle). It matches Entry 7's
+category instead — MediaPipe's pose model, trained mostly on
+frontal/side human imagery, struggling with a steep or overhead
+viewing angle. Entry 7 showed that failure mode as smooth-but-biased
+readings (angle reading falsely high, but SMOOTHLY so). This clip
+suggests the same underlying cause (non-frontal camera geometry
+confusing the pose estimator) can also manifest as outright unstable,
+noisy, high-dropout tracking instead of a smooth bias — likely
+depending on exact mount angle/distance/lighting. Best working
+hypothesis: fall-03-cam1 is another steep-angle or overhead mount,
+similar in category to fall-02-cam1 (Entry 7), just with worse
+tracking stability than that clip had.
+
+**Fix:** none applied — diagnosis only, consistent with Entries 4/7/8.
+
+**Result:** miss confirmed, plausible root cause identified from log
+patterns alone. Visual confirmation (reference frames from the actual
+video) not yet done for this specific clip — flagged as a follow-up
+if a firmer conclusion is needed, e.g. before finalizing the README's
+description of this clip specifically.
+
+**Takeaway for README:** supports the same overhead/steep-angle
+limitation from Entry 7 with a second, independent data point — but
+also demonstrates that this limitation doesn't always look the same
+in the data (smooth-and-biased vs. noisy-and-dropout-heavy), which is
+itself a useful nuance: detecting "this camera angle is unreliable"
+automatically (e.g. via dropout rate or frame-to-frame value
+volatility as a health-check signal) could be a legitimate v2 feature
+in its own right — flagging a bad camera feed rather than silently
+producing wrong fall/no-fall answers from it.
+
+---
+
+## Entry 10 — Design proposal: automatic camera-viewpoint health check
+**Date:** Week 1, Day 5
+
+**What happened:** No new clip run this entry — this is a design idea
+captured before building anything, connecting threads from several
+earlier entries.
+
+**The idea:** right now the pipeline has zero awareness of camera
+geometry — it applies the same `torso_angle`/`hip_velocity` logic
+regardless of whether the camera is a reliable side-on view or a
+problematic overhead/steep one. Every camera-geometry diagnosis so
+far (Entries 4, 7, 8, 9) has been done manually, by a person watching
+the actual footage and describing it. Proposal: build an automatic
+"viewpoint health check" that runs on each camera BEFORE trusting its
+angle-based signal, using statistical fingerprints we've already
+observed by hand:
+  - **Resting baseline angle** — a normal standing person should read
+    torso_angle near 0-10° (confirmed on fall-04-cam0's t=0 frame:
+    7°). An elevated resting baseline (fall-04-cam1 started at 59°;
+    fall-02-cam1, Entry 7, stayed 55-90° throughout) signals the
+    side-on assumption doesn't hold for this camera.
+  - **Frame-to-frame volatility** — normal clips show smooth angle
+    curves frame to frame. Entry 9 (fall-03-cam1) showed swings like
+    22°→52°→22° across consecutive frames — far faster than real body
+    movement allows.
+  - **Landmark dropout rate** — Entry 9 also showed ~1/3 of frames
+    with no landmarks at all, spread through the WHOLE clip rather
+    than clustered at impact (contrast with Entry 3's ~6-frame
+    impact-only gap on an otherwise reliable camera).
+
+If a camera fails this check, the system would either (a) reduce
+confidence scores generally, or (b) lean more heavily on
+`hip_velocity` alone (which has held up more consistently than angle
+across every entry so far — even Entry 8's frontal-fall miss had a
+correct, strong velocity spike) rather than requiring the angle gate
+to open at all.
+
+**Why this matters / what it connects:** directly builds on Entry 8's
+already-flagged idea (velocity-only fallback path) by adding the
+missing piece — WHEN to trust velocity-only vs. requiring the full
+angle+velocity combination. Without a health check, a velocity-only
+fallback risks more false positives on GOOD cameras; with one, it
+only kicks in for cameras that have already been statistically
+flagged as unreliable.
+
+**Fix:** none yet — this is a design proposal only, not implemented.
+Deliberately logged before prototyping, per team discussion, to
+decide whether more data is needed first (see next entry / decision
+below) before committing to specific thresholds.
+
+**Open question flagged before building:** current "bad camera"
+examples number only 2-3 (fall-02-cam1, fall-03-cam1, and
+fall-04-cam1 pending visual confirmation of its actual geometry) —
+and even those don't share one clean signature (Entry 7 = permanently
+elevated; Entry 9 = noisy/high-dropout; fall-04-cam1 = a third,
+not-yet-confirmed shape). Risk of designing thresholds that overfit
+to 2-3 anecdotes rather than a real general pattern. Decision: gather
+a few more clips specifically to build out a small "camera profile"
+dataset (contrasting known-good vs. known-bad cameras) before
+finalizing any hard thresholds for this check.
+
+**Takeaway for README:** this is a strong "here's the natural next
+architectural step, and here's why we deliberately didn't rush into
+building it without enough data" story — shows engineering judgment
+about when to gather more evidence vs. when to start building,
+not just a list of fixes.
+
+---
+
+## Entry 11 — Normal-at-rest camera still misses: corrects Entry 10's design
+**Date:** Week 1, Day 6
+
+**What happened:** Ran `fall-05-cam1.mp4`. No alert. But this miss
+looks fundamentally different from Entries 7/9's cam1 failures, and
+it exposes a real gap in the Entry 10 design proposal.
+
+**Investigation:** resting baseline (most of the clip before the
+fall) sits in a completely normal range — torso_angle mostly 0.3°-3°,
+matching fall-05-cam0's healthy baseline closely. No elevated
+starting angle (unlike Entry 7), no excessive scattered dropout or
+wild frame-to-frame jitter (unlike Entry 9). By every Entry 10
+health-check criterion, this camera would have been judged RELIABLE.
+
+But during the fall itself (frames 100-115, t=3.3-3.6s), hip_velocity
+spikes repeatedly and strongly — 1.05, 1.29, 0.96, 1.05, 0.89, 1.10,
+all comfortably above the 0.8 threshold, multiple times in a row.
+torso_angle during that same window only climbs to 20-25°, and never
+exceeds ~32° anywhere in the entire clip (frame 147, near the end).
+Velocity is unambiguous; angle never gets remotely close to the 60°
+gate.
+
+**Root cause:** this matches Entry 8's category, not Entry 7/9's —
+the fall's direction of travel happens to run along this camera's
+viewing axis (same foreshortening mechanism as fall-03-cam0), even
+though the camera's baseline/resting behavior is completely healthy.
+
+**Why this corrects Entry 10:** Entry 10 proposed a health check based
+on calibrating each camera ONCE, at rest, before trusting it. This
+entry proves that approach has a blind spot — it can only catch
+cameras that are broken all the time (Entry 7/9's category). It
+CANNOT catch a camera that behaves perfectly at rest but fails for a
+specific fall's trajectory (Entry 8/11's category), because trajectory
+-dependent failure is invisible until an actual fall happens along the
+bad axis. A one-time rest calibration would have given this camera a
+clean bill of health right before it silently missed a real fall.
+
+**Fix:** none applied. This changes what Entry 10 needs to become —
+noted below.
+
+**Result:** miss confirmed. More importantly: proof that "is this
+camera generally reliable" and "will this camera catch THIS fall" are
+two different questions, and a design that only answers the first one
+provides false confidence, not real safety.
+
+**Takeaway for README / revised v2 direction:** the corrected design
+insight is that camera reliability isn't a fixed property of a
+camera — it's dependent on the interaction between camera position
+and fall direction, which can't be fully known in advance. This
+argues MORE strongly for Entry 8's velocity-only fallback path (since
+velocity was correct here, same as Entry 8, even though angle-based
+health-checking couldn't have caught this case) and suggests Entry
+10's health check is still useful for the Entry 7/9 category of
+failure, but needs to be explicitly scoped as "catches broken-camera
+misses, does NOT catch trajectory misses" rather than implied as a
+general reliability solution. Two different problems, two different
+mitigations — conflating them would have shipped a false sense of
+coverage.
 
 ---
 
