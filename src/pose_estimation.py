@@ -17,6 +17,13 @@ Output contract for the rest of the pipeline:
     matching MediaPipe's native output.
 """
 
+import os
+# Suppress noisy TensorFlow Lite / absl startup logs (delegate creation,
+# signature warnings, etc.) — these are harmless but drown out our own
+# [ALERT] / progress output. Must be set BEFORE mediapipe is imported.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("GLOG_minloglevel", "2")
+
 import cv2
 import mediapipe as mp
 
