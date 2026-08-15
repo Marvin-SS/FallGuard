@@ -29,6 +29,20 @@ The detector can only leave the `normal` state once `torso_angle` crosses thresh
 **2. A "camera health check" idea got proposed, then corrected by more data, before it was ever built.**
 The natural fix for the camera-reliability problem seemed to be: calibrate each camera once at rest, and flag ones that look unreliable from the start (elevated baseline angle, noisy/high-dropout tracking). That design was deliberately logged and *not* built immediately, pending more test clips. The next clip disproved it: a camera with a completely normal, healthy resting baseline still missed a real fall, because the failure was trajectory-dependent, not a property of the camera itself, invisible until a fall actually happened along that camera's bad axis. The design was rescoped accordingly rather than shipped as a general solution it wasn't. The full reasoning is in `findings.txt` (Entries 10-11): it's the clearest example in this project of catching a design assumption before it became a false sense of coverage.
 
+## Experiment: rule-based vs. learned classifier
+
+To test whether the rule-based system's blind spots were fundamental or just a modeling choice, a second detector was built: a Random Forest trained on whole-clip summary features (max angle, max velocity, resting baseline angle, frame-to-frame volatility, dropout rate, and related stats extracted from the per-frame logs), evaluated with leave-one-out cross-validation given the small dataset size (~15-17 clips).
+
+**Result: 73.3% LOOCV accuracy (11/15 correct), a genuinely mixed outcome, not a clean win.**
+
+What it fixed: 3 of the rule-based system's documented misses, all cases where frame-by-frame timing broke down but the overall shape of the clip still carried the fall signature (fall-01-cam1's foreshortening, fall-02-cam1's overhead camera, fall-03-cam1's noisy/high-dropout tracking).
+
+What it broke: 2 new false positives on ADL clips the rule-based system never flagged, and 1 regression, a previously-solved fall (fall-03-cam0) that the rule-based system's velocity-window fix correctly caught, now missed. Neither root cause is understood yet.
+
+Working theory: whole-clip summary statistics are less sensitive to exact-frame timing, which is what let the model recover the timing-dependent misses, but that same insensitivity may be what's costing it precision elsewhere. Feature importances put `max_hip_velocity` well ahead of everything else, followed by `dropout_rate`, though `dropout_rate` ranking that high is suspicious: only 2 clips in the whole dataset were ever documented as having real dropout issues, and it may be a spurious signal contributing to the new false positives rather than a generalizable one.
+
+The point of documenting this rather than glossing over it: a learned model isn't strictly better than hand-tuned rules, it trades one set of failure modes for a different one. This is still an open investigation, not a completed feature, and it's presented as one honestly. See `findings.txt`, Entry 14.
+
 ---
 
 ## Project structure
@@ -107,6 +121,7 @@ These aren't bugs so much as first-order constraints of single-camera 2D pose-ba
 
 ## Roadmap
 
+- [ ] **Diagnose Random Forest false positives/regression**: root-cause the 2 new ADL false positives and the fall-03-cam0 regression from the learned-classifier experiment before considering it a candidate to replace or complement the rule-based system (see `findings.txt`, Entry 14).
 - [ ] **Velocity-only fallback trigger**: allow a strong, sustained velocity spike to trigger `impact_detected` without requiring `torso_angle` to cross threshold: needs false-positive testing against fast-but-normal motion (sitting quickly, bending).
 - [ ] **Camera viewpoint health check**: flag cameras with abnormal resting baseline, high landmark dropout, or excessive frame-to-frame volatility. Explicitly scoped to catch *broken-camera* failures only, not trajectory-dependent ones (see Entry 11).
 - [ ] **Overhead-specific feature set**: bounding-box area and motion-blob dispersal for ceiling-mounted cameras, common in real senior-care deployments.
@@ -116,7 +131,7 @@ These aren't bugs so much as first-order constraints of single-camera 2D pose-ba
 
 ## Tech stack
 
-Python · MediaPipe `0.10.21` · OpenCV · NumPy/pandas for CSV logging and scoring · (planned) FastAPI · (planned) React
+Python · MediaPipe `0.10.21` · OpenCV · NumPy/pandas for CSV logging and scoring · scikit-learn (Random Forest, experimental) · (planned) FastAPI · (planned) React
 
 ## Engineering log
 
